@@ -404,75 +404,36 @@ export function Reports() {
   const handleDownloadReport = async (report: Report) => {
     try {
       if (!report.filePath) {
-        alert('Файл не доступен для скачивания');
+        alert('Файл не найден');
         return;
       }
   
-      console.log('Starting download for:', report.filePath);
-  
-      // Скачиваем файл как blob - это гарантирует скачивание
+      // Скачиваем файл из Supabase
       const { data, error } = await supabase.storage
         .from('reports')
         .download(report.filePath);
   
-      if (error) {
-        console.error('Download error:', error);
-        throw new Error(`Ошибка загрузки: ${error.message}`);
+      if (error || !data) {
+        console.error('Ошибка скачивания:', error);
+        alert('Не удалось скачать файл');
+        return;
       }
   
-      // Создаем blob URL из полученных данных
-      const blob = new Blob([data], { type: report.fileType || 'application/octet-stream' });
-      const blobUrl = URL.createObjectURL(blob);
-      
-      // Создаем скрытую ссылку для скачивания
-      const link = document.createElement('a');
-      link.href = blobUrl;
-      link.download = report.fileName; // Важнейший параметр - заставляет скачивать
-      
-      // Дополнительные атрибуты для надежности
-      link.setAttribute('download', report.fileName);
-      link.setAttribute('type', 'application/octet-stream');
-      link.style.display = 'none';
-      link.target = '_blank';
-      
-      // Добавляем в DOM и кликаем
-      document.body.appendChild(link);
-      link.click();
-      
-      // Убираем ссылку и очищаем URL
-      document.body.removeChild(link);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 100);
-  
-      console.log('File downloaded successfully:', report.fileName);
-  
-    } catch (error) {
-      console.error('Full download error:', error);
-      
-      // Fallback: пробуем через signed URL если blob не сработал
-      try {
-        console.log('Trying fallback with signed URL...');
-        
-        const { data: signedData, error: signedError } = await supabase.storage
-          .from('reports')
-          .createSignedUrl(report.filePath, 60, {
-            download: report.fileName
-          });
-  
-        if (signedError) {
-          console.error('Signed URL error:', signedError);
-          throw new Error(`Signed URL failed: ${signedError.message}`);
-        }
-  
-        // Открываем signed URL в новой вкладке
-        window.open(signedData.signedUrl, '_blank');
-        console.log('Opened via signed URL');
-  
-      } catch (signedError) {
-        console.error('All download methods failed:', signedError);
-        alert('Не удалось скачать файл. Попробуйте позже или обратитесь к администратору.');
-      }
+      // Создаём ссылку и форсируем скачивание
+      const url = URL.createObjectURL(data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = report.fileName || 'report'; // <-- ключевая строка
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error(err);
+      alert('Ошибка при скачивании файла');
     }
   };
+  
 
   const canViewReport = (report: Report): boolean => {
     if (user?.role === 'admin') return true;

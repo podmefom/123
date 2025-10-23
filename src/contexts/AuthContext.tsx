@@ -190,13 +190,13 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           manager:profiles!projects_manager_id_fkey(*)
         `)
         .order('created_at', { ascending: false });
-  
+    
       if (projectsError) {
         console.error('Error fetching projects:', projectsError);
         setProjects([]);
         return;
       }
-  
+    
       // Затем отдельно получаем members и files для каждого проекта
       const projectsWithDetails = await Promise.all(
         (projectsData || []).map(async (project: any) => {
@@ -209,13 +209,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
               profiles(*)
             `)
             .eq('project_id', project.id);
-  
+    
           // Получаем files для проекта
           const { data: filesData } = await supabase
             .from('project_files')
             .select('*')
             .eq('project_id', project.id);
-  
+    
+          console.log('📁 Files data from database:', filesData); // Отладочная информация
+    
           // Трансформируем данные
           return {
             id: project.id,
@@ -246,6 +248,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
               name: file.name,
               type: file.file_type,
               size: file.file_size,
+              path: file.path, // ВАЖНО: загружаем путь
               preview: file.preview_url,
               uploadedBy: users.find(u => u.id === file.uploaded_by) || { name: 'Unknown' },
               uploadedAt: new Date(file.uploaded_at)
@@ -253,12 +256,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
           };
         })
       );
-  
-      console.log('Projects fetched:', projectsWithDetails);
+    
+      console.log('✅ Projects fetched with files:', projectsWithDetails);
       setProjects(projectsWithDetails);
-  
+    
     } catch (err) {
-      console.error('Exception fetching projects:', err);
+      console.error('❌ Exception fetching projects:', err);
       setProjects([]);
     }
   };
@@ -375,6 +378,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
   };
 
   const addFileToProject = async (projectId: string, fileData: Omit<ProjectFile, 'id' | 'uploadedAt'>): Promise<void> => {
+    console.log('💾 Saving file to database:', {
+      projectId,
+      fileData,
+      path: fileData.path // Добавляем отладочную информацию
+    });
+  
     const { error } = await supabase
       .from('project_files')
       .insert({
@@ -382,15 +391,18 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         name: fileData.name,
         file_type: fileData.type,
         file_size: fileData.size,
+        path: fileData.path, // ВАЖНО: сохраняем путь
         preview_url: fileData.preview,
-        file_url: fileData.preview || '#', // In a real app, you'd upload to storage
+        file_url: fileData.preview || '#',
         uploaded_by: profile?.id
       });
-
+  
     if (error) {
+      console.error('❌ Error saving file to database:', error);
       throw error;
     }
-
+  
+    console.log('✅ File saved to database with path:', fileData.path);
     await fetchProjects();
   };
 

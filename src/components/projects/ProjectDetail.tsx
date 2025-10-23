@@ -21,6 +21,7 @@ import { Button } from '../ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
 import { useAuth } from '../../contexts/AuthContext';
 import { Project, ProjectFile } from '../../types/user';
+import { supabase } from '../../lib/supabase.ts';
 
 interface FileUploadModalProps {
   isOpen: boolean;
@@ -281,19 +282,64 @@ export function ProjectDetail({ projectId, onBack }: ProjectDetailProps) {
     setEditData({});
   };
 
-  const handleFileUpload = (files: File[]) => {
-    files.forEach(file => {
-      const fileData: Omit<ProjectFile, 'id' | 'uploadedAt'> = {
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
-        uploadedBy: user!
-      };
-      
-      addFileToProject(projectId, fileData);
-    });
+  const handleFileUpload = async (files: File[]) => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.error('User not authenticated');
+      return;
+    }
+  
+    for (const file of files) {
+      try {
+        // Создаем уникальное имя файла
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${Math.random().toString(36).substring(2)}_${Date.now()}.${fileExt}`;
+        const filePath = `${projectId}/${fileName}`;
+  
+        console.log('📤 Uploading file:', file.name, 'to path:', filePath);
+  
+        // Загружаем файл в Supabase Storage
+        const { data, error } = await supabase.storage
+          .from('projects')
+          .upload(filePath, file, {
+            cacheControl: '3600',
+            upsert: false
+          });
+  
+        if (error) {
+          console.error('❌ Upload error:', error);
+          continue;
+        }
+  
+        console.log('✅ Upload successful:', data);
+  
+        // Получаем публичный URL ДЛЯ ВСЕХ файлов
+        const { data: urlData } = supabase.storage
+          .from('projects')
+          .getPublicUrl(filePath);
+  
+        const fileData: Omit<ProjectFile, 'id' | 'uploadedAt'> = {
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          path: filePath, // ВАЖНО: сохраняем путь для всех файлов
+          preview: file.type.startsWith('image/') ? urlData.publicUrl : undefined,
+          uploadedBy: user!
+        };
+  
+        console.log('💾 File data to save:', fileData);
+        
+        // Проверим, что path действительно передается
+        console.log('🔍 Path in fileData:', fileData.path);
+        
+        addFileToProject(projectId, fileData);
+        
+      } catch (err) {
+        console.error('❌ Error in file upload:', err);
+      }
+    }
   };
+
 
   const handleFileDelete = (fileId: string) => {
     const file = project.files.find(f => f.id === fileId);
@@ -303,28 +349,159 @@ export function ProjectDetail({ projectId, onBack }: ProjectDetailProps) {
     removeFileFromProject(projectId, fileId);
   };
 
-  const handleFileDownload = (file: ProjectFile) => {
-    if (file.preview) {
-      // Для файлов с preview (изображения)
-      const link = document.createElement('a');
-      link.href = file.preview;
-      link.download = file.name;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } else {
-      // Для других файлов создаем blob
-      const blob = new Blob([''], { type: file.type });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = file.name;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+  const handleFileDownload = async (file: ProjectFile) => {
+    console.log('Downloading file:', file);
+    
+    // Проверяем наличие пути
+    if (!file.path) {
+      console.error('Файл не имеет пути для скачивания:', file);
+      
+      // Попробуем создать путь на основе имени файла и projectId
+      const possiblePath = `${projectId}/${file.name}`;
+      console.log('Trying alternative path:', possiblePath);
+      
+      // Пробуем скачать с альтернативным путем
+      try {
+        const { data, error } = await supabase
+          .storage
+          .from('projects')
+          .download(possiblePath);
+  
+        if (!error && data) {
+          // Если нашли файл по альтернативному пути, скачиваем
+          downloadFile(data, file.name);
+          console.log('File downloaded using alternative path');
+          return;
+        } else {
+          console.error('File not found with alternative path:', error);
+        }
+      } catch (err) {
+        console.error('Alternative path also failed:', err);
+      }
+      
+      // Если альтернативный путь не сработал, попробуем найти файл в storage
+      await searchAndDownloadFile(file);
+      return;
+    }
+  
+    try {
+      const { data, error } = await supabase
+        .storage
+        .from('projects')
+        .download(file.path);
+  
+      if (error) {
+        console.error('Ошибка скачивания файла:', error.message);
+        // Попробуем найти файл другим способом
+        await searchAndDownloadFile(file);
+        return;
+      }
+  
+      downloadFile(data, file.name);
+    } catch (err) {
+      console.error('Ошибка при скачивании файла:', err);
+      await searchAndDownloadFile(file);
     }
   };
+  
+  // Новая функция для поиска и скачивания файла
+  const searchAndDownloadFile = async (file: ProjectFile) => {
+    try {
+      // Получаем список всех файлов в папке проекта
+      const { data: filesList, error } = await supabase.storage
+        .from('projects')
+        .list(projectId);
+  
+      if (error) {
+        console.error('Error listing files:', error);
+        alert('Не удалось найти файл в хранилище');
+        return;
+      }
+  
+      // Ищем файл по имени (частичное совпадение)
+      const foundFile = filesList.find(f => 
+        f.name.includes(file.name) || file.name.includes(f.name)
+      );
+  
+      if (foundFile) {
+        const correctPath = `${projectId}/${foundFile.name}`;
+        console.log('Found file in storage:', correctPath);
+        
+        // Скачиваем файл
+        const { data, error: downloadError } = await supabase.storage
+          .from('projects')
+          .download(correctPath);
+  
+        if (!downloadError && data) {
+          downloadFile(data, file.name);
+          // Обновляем путь файла
+          updateFileWithPath(projectId, file.id, correctPath);
+        } else {
+          alert('Файл найден, но не удалось его скачать');
+        }
+      } else {
+        alert('Файл не найден в хранилище. Возможно, он был удален.');
+      }
+    } catch (err) {
+      console.error('Error searching for file:', err);
+      alert('Произошла ошибка при поиске файла');
+    }
+  };
+  
+  // Вспомогательная функция для скачивания файла
+  const downloadFile = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+  
+
+  
+  // Вспомогательная функция для извлечения пути из URL
+  const extractPathFromUrl = (url: string): string | null => {
+    try {
+      const urlObj = new URL(url);
+      // Путь обычно находится после /storage/v1/object/public/projects/
+      const pathMatch = urlObj.pathname.match(/\/projects\/(.+)/);
+      return pathMatch ? pathMatch[1] : null;
+    } catch {
+      return null;
+    }
+  };
+  
+  // Функция для скачивания через прямой URL
+  const downloadViaUrl = async (url: string, filename: string) => {
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err) {
+      console.error('Ошибка скачивания через URL:', err);
+    }
+  };
+  
+  
+  const getFilePreviewUrl = (file: ProjectFile) => {
+    // для изображений создаём временный blob URL
+    if (file.type.startsWith('image/')) {
+      return supabase.storage.from('projects').getPublicUrl(file.path).publicUrl;
+    }
+    return null;
+  };
+  
+  
   const formatFileSize = (bytes: number) => {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
